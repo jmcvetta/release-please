@@ -473,6 +473,14 @@ describe('MavenWorkspace plugin', () => {
           ],
         }),
       ];
+      // Snapshot proposals must preserve the published manifest, not publish snapshots.
+      const publishedVersions = {
+        maven1: '1.1.1',
+        maven2: '2.2.2',
+        maven3: '3.3.3',
+        maven4: '4.4.4',
+      };
+      const publishedManifest = JSON.stringify(publishedVersions);
       stubFilesFromFixtures({
         sandbox,
         github,
@@ -485,18 +493,18 @@ describe('MavenWorkspace plugin', () => {
         ],
         flatten: false,
         targetBranch: 'main',
+        inlineFiles: [['.release-please-manifest.json', publishedManifest]],
       });
       const newCandidates = await plugin.run(candidates);
       expect(newCandidates).length(1);
-      const update = assertHasUpdate(
+      const changes = await github.buildChangeSet(
         newCandidates[0].pullRequest.updates,
-        '.release-please-manifest.json',
-        ReleasePleaseManifest
+        'main'
       );
-      const updater = update.updater as ReleasePleaseManifest;
-      for (const [_, version] of updater.versionsMap!) {
-        expect(version.toString()).to.not.include('SNAPSHOT');
-      }
+      const manifest = changes.get('.release-please-manifest.json')?.content;
+      expect(JSON.parse(manifest ?? publishedManifest)).to.eql(
+        publishedVersions
+      );
     });
   });
 });
