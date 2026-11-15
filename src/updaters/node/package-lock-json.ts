@@ -32,9 +32,11 @@ type LockFileV2 = {
 export class PackageLockJson implements Updater {
   version?: Version;
   versionsMap?: VersionsMap;
-  constructor(options: Partial<UpdateOptions>) {
+  private workspacePackage?: string;
+  constructor(options: Partial<UpdateOptions> & {workspacePackage?: string}) {
     this.version = options.version;
     this.versionsMap = options.versionsMap;
+    this.workspacePackage = options.workspacePackage;
   }
   updateContent(content: string, logger: Logger = defaultLogger): string {
     const parsed = JSON.parse(content) as LockFileV2;
@@ -50,6 +52,7 @@ export class PackageLockJson implements Updater {
 
       if (this.versionsMap) {
         this.versionsMap.forEach((version, name) => {
+          if (this.workspacePackage && name !== this.workspacePackage) return;
           let pkg = parsed.packages['node_modules/' + name];
           if (!pkg) {
             return;
@@ -85,6 +88,8 @@ export class PackageLockJson implements Updater {
         if (!obj.name) {
           continue;
         }
+        if (this.workspacePackage && obj.name !== this.workspacePackage)
+          continue;
 
         const ver = this.versionsMap.get(obj.name);
         if (ver) {
