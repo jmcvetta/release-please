@@ -31,7 +31,6 @@ import {Update} from '../../src/update';
 import {Version} from '../../src/version';
 import {PomXml} from '../../src/updaters/java/pom-xml';
 import {RawContent} from '../../src/updaters/raw-content';
-import {ReleasePleaseManifest} from '../../src/updaters/release-please-manifest';
 
 const sandbox = sinon.createSandbox();
 const fixturesPath = './test/fixtures/plugins/maven-workspace';

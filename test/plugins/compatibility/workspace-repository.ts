@@ -14,7 +14,7 @@
 
 import {execFileSync} from 'child_process';
 import {mkdirSync, mkdtempSync, writeFileSync, rmSync} from 'fs';
-import {devNull, tmpdir} from 'os';
+import {tmpdir} from 'os';
 import {dirname, join} from 'path';
 import * as sinon from 'sinon';
 import {GitHub, GitHubRelease} from '../../../src/github';
@@ -141,14 +141,13 @@ export class WorkspaceRepository {
         const files = this.git('ls-tree', '-r', '--name-only', ref).split('\n');
         return files.some(file => file.startsWith(`${glob}/`)) ? [glob] : [];
       });
-    const self = this;
-    sandbox.stub(github, 'mergeCommitIterator').callsFake(async function* () {
-      for (const sha of self.git('rev-list', 'main').split('\n')) {
-        yield {
-          sha,
-          message: self.git('show', '-s', '--format=%B', sha),
-          files: self
-            .git(
+    sandbox.stub(github, 'mergeCommitIterator').callsFake(
+      async function* (this: WorkspaceRepository) {
+        for (const sha of this.git('rev-list', 'main').split('\n')) {
+          yield {
+            sha,
+            message: this.git('show', '-s', '--format=%B', sha),
+            files: this.git(
               'diff-tree',
               '--root',
               '--no-commit-id',
@@ -156,54 +155,62 @@ export class WorkspaceRepository {
               '-r',
               sha
             )
-            .split('\n')
-            .filter(Boolean),
-          pullRequest: self.merged.get(sha),
-        };
-      }
-    });
-    sandbox.stub(github, 'releaseIterator').callsFake(async function* () {
-      yield* [...self.releases].reverse();
-    });
-    sandbox.stub(github, 'tagIterator').callsFake(async function* () {
-      for (const name of self.git('tag').split('\n').filter(Boolean)) {
-        yield {name, sha: self.git('rev-list', '-n', '1', name)};
-      }
-    });
-    sandbox
-      .stub(github, 'pullRequestIterator')
-      .callsFake(async function* (_branch, status) {
-        yield* self.pulls.filter(pr =>
+              .split('\n')
+              .filter(Boolean),
+            pullRequest: this.merged.get(sha),
+          };
+        }
+      }.bind(this)
+    );
+    sandbox.stub(github, 'releaseIterator').callsFake(
+      async function* (this: WorkspaceRepository) {
+        yield* [...this.releases].reverse();
+      }.bind(this)
+    );
+    sandbox.stub(github, 'tagIterator').callsFake(
+      async function* (this: WorkspaceRepository) {
+        for (const name of this.git('tag').split('\n').filter(Boolean)) {
+          yield {name, sha: this.git('rev-list', '-n', '1', name)};
+        }
+      }.bind(this)
+    );
+    sandbox.stub(github, 'pullRequestIterator').callsFake(
+      async function* (
+        this: WorkspaceRepository,
+        ...[_branch, status]: Parameters<GitHub['pullRequestIterator']>
+      ) {
+        yield* this.pulls.filter(pr =>
           status === 'MERGED' ? !!pr.sha : status === 'CLOSED' ? false : !pr.sha
         );
-      });
+      }.bind(this)
+    );
     sandbox
       .stub(github, 'createPullRequest')
       .callsFake(async (pr, _branch, _message, updates) => {
-        const result = {...pr, number: self.nextNumber++};
-        result.files = await self.updateBranch(result.headBranchName, updates);
-        self.pulls.push(result);
+        const result = {...pr, number: this.nextNumber++};
+        result.files = await this.updateBranch(result.headBranchName, updates);
+        this.pulls.push(result);
         return result;
       });
     sandbox.stub(github, 'updatePullRequest').callsFake(async (number, pr) => {
-      const existing = self.pulls.find(item => item.number === number)!;
-      existing.files = await self.updateBranch(pr.headRefName, pr.updates);
+      const existing = this.pulls.find(item => item.number === number)!;
+      existing.files = await this.updateBranch(pr.headRefName, pr.updates);
       existing.title = pr.title.toString();
       existing.body = pr.body.toString();
-      self.refreshes.push(number);
+      this.refreshes.push(number);
       return existing;
     });
     sandbox.stub(github, 'createRelease').callsFake(async release => {
       const tagName = release.tag.toString();
-      self.git('tag', tagName, release.sha);
+      this.git('tag', tagName, release.sha);
       const result = {
-        id: self.releases.length + 1,
+        id: this.releases.length + 1,
         tagName,
         sha: release.sha,
         notes: release.notes,
         url: `https://example.com/${tagName}`,
       };
-      self.releases.push(result);
+      this.releases.push(result);
       return result;
     });
     sandbox
@@ -212,11 +219,11 @@ export class WorkspaceRepository {
     sandbox
       .stub(github, 'removeIssueLabels')
       .callsFake(async (labels, number) => {
-        const pr = self.pulls.find(item => item.number === number)!;
+        const pr = this.pulls.find(item => item.number === number)!;
         pr.labels = pr.labels.filter(label => !labels.includes(label));
       });
     sandbox.stub(github, 'addIssueLabels').callsFake(async (labels, number) => {
-      self.pulls.find(item => item.number === number)!.labels.push(...labels);
+      this.pulls.find(item => item.number === number)!.labels.push(...labels);
     });
   }
 
@@ -227,7 +234,7 @@ export class WorkspaceRepository {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GIT_CONFIG_GLOBAL: devNull,
+        GIT_CONFIG_GLOBAL: join(this.directory, '.git', 'fixture-global-config'),
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_DIR: undefined,
         GIT_WORK_TREE: undefined,
