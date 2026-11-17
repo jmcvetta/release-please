@@ -379,8 +379,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       for (const candidate of candidates) {
         const pkg = this.packagesByPath.get(candidate.path)!;
         const updater = new PackageLockJson({
-          version:
-            pkg.path === '.' ? candidate.pullRequest.version : undefined,
+          version: pkg.path === '.' ? candidate.pullRequest.version : undefined,
           versionsMap: this.versionsForPackage(pkg, _updatedVersions),
           workspacePackage: pkg.name,
         });
