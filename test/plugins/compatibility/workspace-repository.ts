@@ -40,7 +40,8 @@ export class WorkspaceRepository {
     sandbox: sinon.SinonSandbox,
     range = 'workspace:^',
     separate = true,
-    readonly labels = ['autorelease: pending']
+    readonly labels = ['autorelease: pending'],
+    initialLibraryVersion = '1.0.0'
   ) {
     this.git('init', '--initial-branch=main');
     this.git('config', 'user.name', 'Release fixture');
@@ -57,13 +58,13 @@ export class WorkspaceRepository {
         component: name,
         'release-type': name === 'simple' ? 'simple' : 'node',
       };
-      versions[path] = '1.0.0';
+      versions[path] = name === 'c' ? initialLibraryVersion : '1.0.0';
       this.write(`${path}/CHANGELOG.md`, '# Changelog\n');
       this.write(
         `${path}/package.json`,
         JSON.stringify({
           name,
-          version: '1.0.0',
+          version: name === 'c' ? initialLibraryVersion : '1.0.0',
           ...(['a', 'b'].includes(name) ? {dependencies: {c: range}} : {}),
         })
       );
@@ -75,7 +76,7 @@ export class WorkspaceRepository {
     for (const name of ['a', 'b', 'c', 'unrelated']) {
       lockPackages[`packages/${name}`] = {
         name,
-        version: '1.0.0',
+        version: name === 'c' ? initialLibraryVersion : '1.0.0',
         ...(['a', 'b'].includes(name) ? {dependencies: {c: range}} : {}),
       };
       lockPackages[`node_modules/${name}`] = {
@@ -113,7 +114,9 @@ export class WorkspaceRepository {
     );
     this.commit('chore: initial versions');
     for (const name of ['a', 'b', 'c', 'unrelated', 'simple']) {
-      const tagName = `${name}-v1.0.0`;
+      const tagName = `${name}-v${
+        name === 'c' ? initialLibraryVersion : '1.0.0'
+      }`;
       this.git('tag', tagName);
       this.releases.push({
         id: this.releases.length + 1,

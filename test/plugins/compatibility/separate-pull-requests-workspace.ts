@@ -149,6 +149,46 @@ describe('Plugin compatibility', () => {
         repository.dispose();
       }
     });
+    // Notes outside versioned release sections must not suppress a needed update.
+    it('ignores stale dependency notes outside release sections', async () => {
+      const repository = new WorkspaceRepository(github, sandbox);
+      try {
+        repository.write(
+          'packages/a/CHANGELOG.md',
+          '# Changelog\n\n* c bumped to 3.0.0\n'
+        );
+        repository.commit('docs: retain historical dependency note');
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        expect(
+          candidates
+            .map(candidate => candidate.body.releaseData[0].component)
+            .sort()
+        ).to.eql(['a', 'b', 'c']);
+      } finally {
+        repository.dispose();
+      }
+    });
+    // An old release outside a deliberate range must not create dependency-only releases forever.
+    it('preserves concrete ranges for previously released dependencies', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        '^1.0.0',
+        true,
+        ['autorelease: pending'],
+        '2.0.0'
+      );
+      try {
+        expect(await (await repository.manifest()).createPullRequests()).to.eql(
+          []
+        );
+      } finally {
+        repository.dispose();
+      }
+    });
     // A later independent consumer release must retain earlier dependency acknowledgments.
     it('retains dependency history across independent releases and tag fallback', async function () {
       this.timeout(30000);

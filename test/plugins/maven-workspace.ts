@@ -501,9 +501,7 @@ describe('MavenWorkspace plugin', () => {
         'main'
       );
       const manifest = changes.get('.release-please-manifest.json')?.content;
-      expect(JSON.parse(manifest ?? publishedManifest)).to.eql(
-        publishedVersions
-      );
+      expect(manifest).to.be.undefined;
     });
   });
 });

@@ -280,7 +280,10 @@ can be released before the library version named in its notes.
 The workspace pass also runs without a new Node candidate. A library that was
 released first can therefore keep its pending consumers current. A consumer
 that already acknowledged that library version does not receive another
-dependency-only release. Independent releasable commits still create releases.
+dependency-only release. Versions already available at the consumer's latest
+release are also acknowledged, so an old release outside a concrete range does
+not force dependency-only releases on every run. Independent releasable
+commits still create releases.
 
 ### Configuration schemas
 

@@ -379,6 +379,8 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       for (const candidate of candidates) {
         const pkg = this.packagesByPath.get(candidate.path)!;
         const updater = new PackageLockJson({
+          version:
+            pkg.path === '.' ? candidate.pullRequest.version : undefined,
           versionsMap: this.versionsForPackage(pkg, _updatedVersions),
           workspacePackage: pkg.name,
         });
@@ -456,13 +458,17 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     if (!this.merge) {
       for (const [name, {value: pkg, deps}] of graph) {
         const versions: VersionsMap = new Map();
+        const noteVersions = this.dependencyNoteVersions(
+          await this.acknowledgmentNotes(pkg)
+        );
         for (const dep of deps) {
           versions.set(
             dep,
             await this.acknowledgedDependencyVersion(
               pkg,
               graph.get(dep)!.value,
-              this.combineDeps(pkg)[dep]
+              this.combineDeps(pkg)[dep],
+              noteVersions.get(dep)
             )
           );
         }
@@ -500,8 +506,8 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
           deps.some(dep => {
             const target = this.dependencyVersions.get(dep);
             const acknowledged = this.acknowledgedVersions.get(name)?.get(dep);
+            if (!target) return false;
             return (
-              target &&
               acknowledged &&
               semver.gt(target.toString(), acknowledged.toString())
             );
@@ -556,10 +562,66 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     return result;
   }
 
+  private async acknowledgmentNotes(pkg: Package): Promise<string> {
+    const release = this.releasesByPath[pkg.path];
+    if (!release || release.notes.trim()) return release?.notes ?? '';
+    if (!release.sha) return '';
+    try {
+      const contents = await this.github.getFileContentsOnBranch(
+        addPath(
+          pkg.path,
+          this.repositoryConfig[pkg.path].changelogPath ?? 'CHANGELOG.md'
+        ),
+        release.sha
+      );
+      return this.releaseChangelogNotes(contents.parsedContent);
+    } catch (error) {
+      if (!(error instanceof FileNotFoundError)) throw error;
+      return '';
+    }
+  }
+
+  private releaseChangelogNotes(changelog: string): string {
+    const lines = changelog.split('\n');
+    const sections: string[] = [];
+    let versioned = false;
+    for (const line of lines) {
+      if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) {
+        versioned = true;
+      }
+      if (versioned) sections.push(line);
+    }
+    return sections.join('\n');
+  }
+
+  private dependencyNoteVersions(notes: string): VersionsMap {
+    const versions: VersionsMap = new Map();
+    for (const line of notes.split('\n')) {
+      const trimmed = line.trim();
+      const marker = trimmed.indexOf(' bumped ');
+      if (!trimmed.startsWith('* ') || marker < 0) continue;
+      const recorded = semver.valid(
+        trimmed
+          .slice(trimmed.lastIndexOf(' to ') + 4)
+          .replace(/^[~^<>= ]+/, '')
+          .trim()
+      );
+      if (recorded) {
+        const name = trimmed.slice(2, marker);
+        const existing = versions.get(name);
+        if (!existing || semver.gt(recorded, existing.toString())) {
+          versions.set(name, Version.parse(recorded));
+        }
+      }
+    }
+    return versions;
+  }
+
   private async acknowledgedDependencyVersion(
     pkg: Package,
     dependency: Package,
-    range: string
+    range: string,
+    recordedVersion?: Version
   ): Promise<Version> {
     const release = this.releasesByPath[pkg.path];
     const dependencyRange = range.replace(/^workspace:/, '');
@@ -568,45 +630,29 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       semver.coerce(dependencyRange)?.version;
     // Workspace shorthand does not store the dependency version. Its release
     // notes record proposed versions even when the consumer is merged first.
-    if (range.startsWith('workspace:') && !version) {
+    const workspaceShorthand = range.startsWith('workspace:') && !version;
+    if (workspaceShorthand) {
       version = dependency.version;
-      if (release?.sha) {
-        try {
-          const contents = await this.github.getFileContentsOnBranch(
-            addPath(dependency.path, 'package.json'),
-            release.sha
-          );
-          version = JSON.parse(contents.parsedContent).version;
-        } catch (error) {
-          if (!(error instanceof FileNotFoundError)) throw error;
-        }
-      }
     }
-    let notes = release?.notes ?? '';
     if (release?.sha) {
       try {
         const contents = await this.github.getFileContentsOnBranch(
-          addPath(
-            pkg.path,
-            this.repositoryConfig[pkg.path].changelogPath ?? 'CHANGELOG.md'
-          ),
+          addPath(dependency.path, 'package.json'),
           release.sha
         );
-        notes += '\n' + contents.parsedContent;
+        const released = JSON.parse(contents.parsedContent).version;
+        if (workspaceShorthand || !version || semver.gt(released, version)) {
+          version = released;
+        }
       } catch (error) {
         if (!(error instanceof FileNotFoundError)) throw error;
       }
     }
-    for (const line of notes.split('\n')) {
-      if (!line.trim().startsWith(`* ${dependency.name} bumped `)) continue;
-      const recorded = semver.valid(
-        line
-          .slice(line.lastIndexOf(' to ') + 4)
-          .replace(/^[~^<>= ]+/, '')
-          .trim()
-      );
-      if (recorded && (!version || semver.gt(recorded, version)))
-        version = recorded;
+    if (
+      recordedVersion &&
+      (!version || semver.gt(recordedVersion.toString(), version))
+    ) {
+      version = recordedVersion.toString();
     }
     return Version.parse(version ?? dependency.version);
   }
