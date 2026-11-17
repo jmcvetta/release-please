@@ -234,7 +234,11 @@ export class WorkspaceRepository {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GIT_CONFIG_GLOBAL: join(this.directory, '.git', 'fixture-global-config'),
+        GIT_CONFIG_GLOBAL: join(
+          this.directory,
+          '.git',
+          'fixture-global-config'
+        ),
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_DIR: undefined,
         GIT_WORK_TREE: undefined,
