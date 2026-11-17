@@ -151,13 +151,16 @@ describe('Plugin compatibility', () => {
     });
     // Notes outside versioned release sections must not suppress a needed update.
     it('ignores stale dependency notes outside release sections', async () => {
-      const repository = new WorkspaceRepository(github, sandbox);
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n* c bumped to 3.0.0\n'
+      );
       try {
-        repository.write(
-          'packages/a/CHANGELOG.md',
-          '# Changelog\n\n* c bumped to 3.0.0\n'
-        );
-        repository.commit('docs: retain historical dependency note');
         repository.change('c', 'feat: add library feature');
         const candidates = await (
           await repository.manifest()
@@ -203,6 +206,17 @@ describe('Plugin compatibility', () => {
         expect(repository.open('a').title).to.include('1.0.2');
         repository.merge(repository.open('a'));
         await (await repository.manifest()).createReleases();
+        const expectedPending = [
+          'chore(main): release b 1.0.1',
+          'chore(main): release c 1.1.0',
+        ];
+        await (await repository.manifest()).createPullRequests();
+        expect(
+          repository.pulls
+            .filter(pr => !pr.sha)
+            .map(pr => pr.title)
+            .sort()
+        ).to.eql(expectedPending);
         repository.releases.length = 0;
         await (await repository.manifest()).createPullRequests();
         expect(
@@ -210,10 +224,7 @@ describe('Plugin compatibility', () => {
             .filter(pr => !pr.sha)
             .map(pr => pr.title)
             .sort()
-        ).to.eql([
-          'chore(main): release b 1.0.1',
-          'chore(main): release c 1.1.0',
-        ]);
+        ).to.eql(expectedPending);
         repository.merge(repository.open('c'));
         await (await repository.manifest()).createReleases();
         await (await repository.manifest()).createPullRequests();

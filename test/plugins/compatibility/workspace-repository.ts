@@ -41,7 +41,8 @@ export class WorkspaceRepository {
     range = 'workspace:^',
     separate = true,
     readonly labels = ['autorelease: pending'],
-    initialLibraryVersion = '1.0.0'
+    initialLibraryVersion = '1.0.0',
+    initialChangelog = '# Changelog\n'
   ) {
     this.git('init', '--initial-branch=main');
     this.git('config', 'user.name', 'Release fixture');
@@ -59,7 +60,7 @@ export class WorkspaceRepository {
         'release-type': name === 'simple' ? 'simple' : 'node',
       };
       versions[path] = name === 'c' ? initialLibraryVersion : '1.0.0';
-      this.write(`${path}/CHANGELOG.md`, '# Changelog\n');
+      this.write(`${path}/CHANGELOG.md`, initialChangelog);
       this.write(
         `${path}/package.json`,
         JSON.stringify({

@@ -563,21 +563,23 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
 
   private async acknowledgmentNotes(pkg: Package): Promise<string> {
     const release = this.releasesByPath[pkg.path];
-    if (!release || release.notes.trim()) return release?.notes ?? '';
-    if (!release.sha) return '';
-    try {
-      const contents = await this.github.getFileContentsOnBranch(
-        addPath(
-          pkg.path,
-          this.repositoryConfig[pkg.path].changelogPath ?? 'CHANGELOG.md'
-        ),
-        release.sha
-      );
-      return this.releaseChangelogNotes(contents.parsedContent);
-    } catch (error) {
-      if (!(error instanceof FileNotFoundError)) throw error;
-      return '';
+    if (!release) return '';
+    let notes = release.notes;
+    if (release.sha) {
+      try {
+        const contents = await this.github.getFileContentsOnBranch(
+          addPath(
+            pkg.path,
+            this.repositoryConfig[pkg.path].changelogPath ?? 'CHANGELOG.md'
+          ),
+          release.sha
+        );
+        notes += '\n' + this.releaseChangelogNotes(contents.parsedContent);
+      } catch (error) {
+        if (!(error instanceof FileNotFoundError)) throw error;
+      }
     }
+    return notes;
   }
 
   private releaseChangelogNotes(changelog: string): string {
