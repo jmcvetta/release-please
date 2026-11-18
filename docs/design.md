@@ -268,6 +268,23 @@ The first is the `preconfigure` hook, which allows making changes to a `Strategy
 configuration. The second is the `run` (post-processor) hook, which allows making changes
 to candidate release pull requests before they are created.
 
+With `node-workspace` in separate-PR mode (`merge: false`), each candidate owns
+only its component's manifest entry and root lockfile package version. The
+plugin compares proposed and released dependency versions with the versions
+already consumed by each dependent release. Concrete dependency ranges,
+dependency release notes, and the package files at the dependent's release SHA
+provide that history. Release notes matter for `workspace:*`, `workspace:^`,
+and `workspace:~`: the declarations do not record a version, and a consumer
+can be released before the library version named in its notes.
+
+The workspace pass also runs without a new Node candidate. A library that was
+released first can therefore keep its pending consumers current. A consumer
+that already acknowledged that library version does not receive another
+dependency-only release. Versions already available at the consumer's latest
+release are also acknowledged, so an old release outside a concrete range does
+not force dependency-only releases on every run. Independent releasable
+commits still create releases.
+
 ### Configuration schemas
 
 We provide JSON-schema representations of both the manifest config and manifest versions

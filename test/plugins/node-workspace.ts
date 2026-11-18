@@ -147,6 +147,47 @@ describe('NodeWorkspace plugin', () => {
     sandbox.restore();
   });
   describe('run', () => {
+    // A root component must keep package.json and both lockfile version fields in agreement.
+    it('updates all root lockfile versions in separate mode', async () => {
+      plugin = new NodeWorkspace(
+        github,
+        'main',
+        {'.': {releaseType: 'node'}},
+        {merge: false}
+      );
+      const candidates: CandidateReleasePullRequest[] = [
+        buildMockCandidatePullRequest('.', 'node', '1.2.0', {
+          component: 'pkgA',
+          updates: [
+            buildMockPackageUpdate('package.json', 'node1/package.json'),
+          ],
+        }),
+      ];
+      const [candidate] = await plugin.run(candidates);
+      const lockUpdate = assertHasUpdate(
+        candidate.pullRequest.updates,
+        'package-lock.json'
+      );
+      const lock = JSON.parse(
+        lockUpdate.updater.updateContent(
+          JSON.stringify({
+            name: '@here/pkgA',
+            version: '1.1.0',
+            lockfileVersion: 3,
+            packages: {
+              '': {name: '@here/pkgA', version: '1.1.0'},
+              'node_modules/@here/pkgA': {
+                name: '@here/pkgA',
+                version: '1.1.0',
+              },
+            },
+          })
+        )
+      );
+      expect(lock.version).to.eql('1.2.0');
+      expect(lock.packages[''].version).to.eql('1.2.0');
+      expect(lock.packages['node_modules/@here/pkgA'].version).to.eql('1.2.0');
+    });
     it('does nothing for non-node strategies', async () => {
       const candidates: CandidateReleasePullRequest[] = [
         buildMockCandidatePullRequest('python', 'python', '1.0.0'),
