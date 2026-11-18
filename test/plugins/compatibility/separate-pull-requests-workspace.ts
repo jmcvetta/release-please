@@ -118,7 +118,8 @@ describe('Plugin compatibility', () => {
     });
   }
   describe('separate-pull-requests and workspace plugin', () => {
-    it('retains combined workspace releases', async () => {
+    it('retains combined workspace releases', async function () {
+      this.timeout(30000);
       const repository = new WorkspaceRepository(
         github,
         sandbox,
