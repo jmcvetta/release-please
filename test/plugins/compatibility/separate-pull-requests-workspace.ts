@@ -365,6 +365,103 @@ describe('Plugin compatibility', () => {
         });
       }
     }
+    // A second library change must not leave pending consumer notes stale or replace their pull requests.
+    it('refreshes pending consumer pull requests after another library change', async function () {
+      this.timeout(30000);
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls.length).to.eql(3);
+        expect(repository.pulls.map(pr => pr.title).sort()).to.eql([
+          'chore(main): release a 1.0.1',
+          'chore(main): release b 1.0.1',
+          'chore(main): release c 1.1.0',
+        ]);
+        const numbers: Record<string, number> = {};
+        for (const name of ['a', 'b', 'c']) {
+          numbers[name] = repository.open(name).number;
+        }
+        const initialBodies: Record<string, string> = {};
+        for (const name of ['a', 'b']) {
+          initialBodies[name] = repository.open(name).body;
+          expect(initialBodies[name]).to.include('c bumped to 1.1.0');
+        }
+        repository.refreshes.length = 0;
+
+        repository.change('c', 'feat!: change the library contract');
+        await (await repository.manifest()).createPullRequests();
+
+        const base = repository.json('.release-please-manifest.json');
+        // The library pull request proposes the breaking version in place.
+        const library = repository.open('c');
+        expect(library.title).to.eql('chore(main): release c 2.0.0');
+        expect(
+          repository.json(
+            '.release-please-manifest.json',
+            library.headBranchName
+          )
+        ).to.eql({...base, 'packages/c': '2.0.0'});
+        // Every pending pull request keeps its original number.
+        expect(repository.pulls.map(pr => pr.number).sort()).to.eql(
+          Object.values(numbers).sort()
+        );
+        for (const name of ['a', 'b']) {
+          const consumer = repository.open(name);
+          expect(consumer.number).to.eql(numbers[name]);
+          expect(repository.refreshes).to.include(numbers[name]);
+          // The refreshed note names the new library version.
+          expect(consumer.body).to.include('c bumped to 2.0.0');
+          expect(consumer.body).to.not.include('c bumped to 1.1.0');
+          expect(consumer.body).to.not.eql(initialBodies[name]);
+          // The consumer proposes only its own manifest entry.
+          expect(
+            repository.json(
+              '.release-please-manifest.json',
+              consumer.headBranchName
+            )
+          ).to.eql({...base, [`packages/${name}`]: '1.0.1'});
+        }
+        // The open pull requests remain exactly the two consumers and the library.
+        expect(
+          repository.pulls
+            .filter(pr => !pr.sha)
+            .map(pr => pr.headBranchName.split('--components--')[1])
+            .sort()
+        ).to.eql(['a', 'b', 'c']);
+
+        // A repeated generation without new commits changes nothing.
+        const state = repository.pulls.map(pr => ({
+          number: pr.number,
+          title: pr.title,
+          body: pr.body,
+        }));
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls.map(pr => pr.number).sort()).to.eql(
+          Object.values(numbers).sort()
+        );
+        for (const pr of repository.pulls) {
+          const before = state.find(item => item.number === pr.number)!;
+          expect(pr.title).to.eql(before.title);
+          expect(pr.body).to.eql(before.body);
+        }
+        for (const name of ['a', 'b']) {
+          expect(
+            repository.json(
+              '.release-please-manifest.json',
+              repository.open(name).headBranchName
+            )
+          ).to.eql({...base, [`packages/${name}`]: '1.0.1'});
+        }
+      } finally {
+        repository.dispose();
+      }
+    });
     it('should version bump dependencies together', async () => {
       // Scenario:
       //   - package a,b depends on c
