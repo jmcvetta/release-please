@@ -445,7 +445,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
           workspacePackageNames.has(dep) &&
           (this.merge ||
             !NPM_PROTOCOL_REGEXP.test(dependencies[dep]) ||
-            dependencies[dep].startsWith('workspace:'))
+            /^(workspace|file|link):/.test(dependencies[dep]))
       );
       graph.set(packageJson.name, {
         deps: workspaceDeps,
@@ -626,13 +626,16 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
   ): Promise<Version> {
     const release = this.releasesByPath[pkg.path];
     const dependencyRange = range.replace(/^workspace:/, '');
-    let version =
-      semver.valid(dependencyRange.replace(/^[~^<>= ]+/, '')) ??
-      semver.coerce(dependencyRange)?.version;
-    // Workspace shorthand does not store the dependency version. Its release
-    // notes record proposed versions even when the consumer is merged first.
-    const workspaceShorthand = range.startsWith('workspace:') && !version;
-    if (workspaceShorthand) {
+    const localProtocol = /^(file|link):/.test(range);
+    let version = localProtocol
+      ? undefined
+      : semver.valid(dependencyRange.replace(/^[~^<>= ]+/, '')) ??
+        semver.coerce(dependencyRange)?.version;
+    // Local paths and workspace shorthand do not store a dependency version.
+    // Notes record proposed versions even when the consumer is merged first.
+    const versionless =
+      localProtocol || (range.startsWith('workspace:') && !version);
+    if (versionless) {
       version = dependency.version;
     }
     if (release?.sha) {
@@ -642,7 +645,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
           release.sha
         );
         const released = JSON.parse(contents.parsedContent).version;
-        if (workspaceShorthand || !version || semver.gt(released, version)) {
+        if (versionless || !version || semver.gt(released, version)) {
           version = released;
         }
       } catch (error) {

@@ -194,46 +194,65 @@ describe('Plugin compatibility', () => {
       }
     });
     // A later independent consumer release must retain earlier dependency acknowledgments.
-    it('retains dependency history across independent releases and tag fallback', async function () {
-      this.timeout(30000);
-      const repository = new WorkspaceRepository(github, sandbox);
+    for (const range of ['workspace:^', 'file:../c-9.0.0', 'link:../c-9.0.0']) {
+      it(`retains dependency history across independent releases and tag fallback with ${range}`, async function () {
+        this.timeout(30000);
+        const repository = new WorkspaceRepository(github, sandbox, range);
+        try {
+          repository.change('c', 'feat: add library feature');
+          await (await repository.manifest()).createPullRequests();
+          repository.merge(repository.open('a'));
+          await (await repository.manifest()).createReleases();
+          repository.change('a', 'fix: independent consumer change');
+          await (await repository.manifest()).createPullRequests();
+          expect(repository.open('a').title).to.include('1.0.2');
+          repository.merge(repository.open('a'));
+          await (await repository.manifest()).createReleases();
+          const expectedPending = [
+            'chore(main): release b 1.0.1',
+            'chore(main): release c 1.1.0',
+          ];
+          await (await repository.manifest()).createPullRequests();
+          expect(
+            repository.pulls
+              .filter(pr => !pr.sha)
+              .map(pr => pr.title)
+              .sort()
+          ).to.eql(expectedPending);
+          repository.releases.length = 0;
+          await (await repository.manifest()).createPullRequests();
+          expect(
+            repository.pulls
+              .filter(pr => !pr.sha)
+              .map(pr => pr.title)
+              .sort()
+          ).to.eql(expectedPending);
+          repository.merge(repository.open('c'));
+          await (await repository.manifest()).createReleases();
+          await (await repository.manifest()).createPullRequests();
+          repository.merge(repository.open('b'));
+          await (await repository.manifest()).createReleases();
+          expect(await (await repository.manifest()).createPullRequests()).to.eql(
+            []
+          );
+        } finally {
+          repository.dispose();
+        }
+      });
+    }
+    // A registry alias must not release consumers of an unrelated registry package.
+    it('excludes registry aliases whose key matches a workspace package', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'npm:other@^1.0.0'
+      );
       try {
         repository.change('c', 'feat: add library feature');
         await (await repository.manifest()).createPullRequests();
-        repository.merge(repository.open('a'));
-        await (await repository.manifest()).createReleases();
-        repository.change('a', 'fix: independent consumer change');
-        await (await repository.manifest()).createPullRequests();
-        expect(repository.open('a').title).to.include('1.0.2');
-        repository.merge(repository.open('a'));
-        await (await repository.manifest()).createReleases();
-        const expectedPending = [
-          'chore(main): release b 1.0.1',
+        expect(repository.pulls.map(pr => pr.title)).to.eql([
           'chore(main): release c 1.1.0',
-        ];
-        await (await repository.manifest()).createPullRequests();
-        expect(
-          repository.pulls
-            .filter(pr => !pr.sha)
-            .map(pr => pr.title)
-            .sort()
-        ).to.eql(expectedPending);
-        repository.releases.length = 0;
-        await (await repository.manifest()).createPullRequests();
-        expect(
-          repository.pulls
-            .filter(pr => !pr.sha)
-            .map(pr => pr.title)
-            .sort()
-        ).to.eql(expectedPending);
-        repository.merge(repository.open('c'));
-        await (await repository.manifest()).createReleases();
-        await (await repository.manifest()).createPullRequests();
-        repository.merge(repository.open('b'));
-        await (await repository.manifest()).createReleases();
-        expect(await (await repository.manifest()).createPullRequests()).to.eql(
-          []
-        );
+        ]);
       } finally {
         repository.dispose();
       }
@@ -244,6 +263,10 @@ describe('Plugin compatibility', () => {
       'workspace:*',
       'workspace:~',
       'workspace:^1.0.0',
+      'file:../c',
+      'link:../c',
+      'file:../c-9.0.0',
+      'link:../c-9.0.0',
       '^1.0.0',
       '~1.0.0',
       '1.0.0',
@@ -284,6 +307,20 @@ describe('Plugin compatibility', () => {
               if (name !== 'c') {
                 expect(pr.body).to.include('c bumped');
                 expect(pr.body).to.include('1.1.0');
+              }
+              if (/^(file|link):/.test(range)) {
+                for (const consumer of ['a', 'b']) {
+                  expect(
+                    repository.json(
+                      `packages/${consumer}/package.json`,
+                      pr.headBranchName
+                    ).dependencies.c
+                  ).to.equal(range);
+                  expect(
+                    repository.json('package-lock.json', pr.headBranchName)
+                      .packages[`packages/${consumer}`].dependencies.c
+                  ).to.equal(range);
+                }
               }
               repository.merge(pr);
               expectedVersions[`packages/${name}`] = version;
