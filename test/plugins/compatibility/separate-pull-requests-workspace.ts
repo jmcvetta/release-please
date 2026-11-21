@@ -29,6 +29,8 @@ import {Version} from '../../../src/version';
 import {PackageJson} from '../../../src/updaters/node/package-json';
 import {expect} from 'chai';
 import {Changelog} from '../../../src/updaters/changelog';
+import {WorkspaceRepository} from './workspace-repository';
+import {FileNotFoundError} from '../../../src/errors';
 
 const sandbox = sinon.createSandbox();
 const fixturesPath = './test/fixtures/plugins/node-workspace';
@@ -62,7 +64,455 @@ describe('Plugin compatibility', () => {
   afterEach(() => {
     sandbox.restore();
   });
+  // Each proposal must preserve the entire base manifest except its own entry.
+  for (const labels of [
+    undefined,
+    ['release: waiting', 'release: validated'],
+  ]) {
+    it(`preserves candidate ownership with ${
+      labels ? 'configured' : 'default'
+    } labels`, async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        labels
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const manifest = await repository.manifest();
+        const candidates = await manifest.buildPullRequests();
+        const base = repository.json('.release-please-manifest.json');
+        expect(candidates).lengthOf(3);
+        for (const candidate of candidates) {
+          const name = candidate.body.releaseData[0].component!;
+          const version = name === 'c' ? '1.1.0' : '1.0.1';
+          const changes = await github.buildChangeSet(
+            candidate.updates,
+            'main'
+          );
+          expect(candidate.labels).to.eql(repository.labels);
+          expect(
+            JSON.parse(changes.get('.release-please-manifest.json')!.content!)
+          ).to.eql({...base, [`packages/${name}`]: version});
+          for (const other of ['a', 'b', 'c', 'unrelated']) {
+            const file = `packages/${other}/package.json`;
+            const contents = changes.get(file)?.content;
+            expect(
+              contents
+                ? JSON.parse(contents).version
+                : repository.json(file).version
+            ).to.eql(other === name ? version : '1.0.0');
+            const lock = JSON.parse(changes.get('package-lock.json')!.content!);
+            expect(lock.packages[`packages/${other}`].version).to.eql(
+              other === name ? version : '1.0.0'
+            );
+          }
+          if (name !== 'c')
+            expect(candidate.body.toString()).to.include('c bumped to 1.1.0');
+        }
+      } finally {
+        repository.dispose();
+      }
+    });
+  }
   describe('separate-pull-requests and workspace plugin', () => {
+    it('retains combined workspace releases', async function () {
+      this.timeout(30000);
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        false
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls).lengthOf(1);
+        repository.merge(repository.pulls[0]);
+        expect(
+          (await (await repository.manifest()).createReleases())
+            .map(release => release!.tagName)
+            .sort()
+        ).to.eql(['a-v1.0.1', 'b-v1.0.1', 'c-v1.1.0']);
+        expect(repository.json('.release-please-manifest.json')).to.eql({
+          'packages/a': '1.0.1',
+          'packages/b': '1.0.1',
+          'packages/c': '1.1.0',
+          'packages/unrelated': '1.0.0',
+          'packages/simple': '1.0.0',
+        });
+        expect(await (await repository.manifest()).createPullRequests()).to.eql(
+          []
+        );
+      } finally {
+        repository.dispose();
+      }
+    });
+    it('scopes shared changelog acknowledgments to their component', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/b-v1.0.0...b-v1.0.0) (2026-01-01)\n\n* c bumped to 1.1.0\n',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        const components = candidates.map(
+          candidate => candidate.body.releaseData[0].component
+        );
+        expect(components).to.include('a');
+        const candidate = candidates.find(
+          candidate => candidate.body.releaseData[0].component === 'a'
+        )!;
+        expect(candidate.body.toString()).to.include('c bumped to 1.1.0');
+      } finally {
+        repository.dispose();
+      }
+    });
+    it('retains acknowledgments in the consumer shared changelog section', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/a-v1.0.0...a-v1.0.0) (2026-01-01)\n\n* c bumped to 1.1.0\n',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        expect(
+          candidates.map(candidate => candidate.body.releaseData[0].component)
+        ).not.to.include('a');
+      } finally {
+        repository.dispose();
+      }
+    });
+    // Notes outside versioned release sections must not suppress a needed update.
+    it('ignores stale dependency notes outside release sections', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/a-v0.0.0...a-v1.0.0) (2026-01-01)\n\nRelease notes.\n\n## Previous notes\n\n* c bumped to 3.0.0\n'
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        expect(
+          candidates
+            .map(candidate => candidate.body.releaseData[0].component)
+            .sort()
+        ).to.eql(['a', 'b', 'c']);
+      } finally {
+        repository.dispose();
+      }
+    });
+    // An old release outside a deliberate range must not create dependency-only releases forever.
+    it('preserves concrete ranges for previously released dependencies', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        '^1.0.0',
+        true,
+        ['autorelease: pending'],
+        '2.0.0'
+      );
+      try {
+        expect(await (await repository.manifest()).createPullRequests()).to.eql(
+          []
+        );
+      } finally {
+        repository.dispose();
+      }
+    });
+    // A later independent consumer release must retain earlier dependency acknowledgments.
+    for (const range of ['workspace:^', 'file:../c-9.0.0', 'link:../c-9.0.0']) {
+      it(`retains dependency history across independent releases and tag fallback with ${range}`, async function () {
+        this.timeout(30000);
+        const repository = new WorkspaceRepository(github, sandbox, range);
+        try {
+          repository.change('c', 'feat: add library feature');
+          await (await repository.manifest()).createPullRequests();
+          repository.merge(repository.open('a'));
+          await (await repository.manifest()).createReleases();
+          repository.change('a', 'fix: independent consumer change');
+          await (await repository.manifest()).createPullRequests();
+          expect(repository.open('a').title).to.include('1.0.2');
+          repository.merge(repository.open('a'));
+          await (await repository.manifest()).createReleases();
+          const expectedPending = [
+            'chore(main): release b 1.0.1',
+            'chore(main): release c 1.1.0',
+          ];
+          await (await repository.manifest()).createPullRequests();
+          expect(
+            repository.pulls
+              .filter(pr => !pr.sha)
+              .map(pr => pr.title)
+              .sort()
+          ).to.eql(expectedPending);
+          repository.releases.length = 0;
+          await (await repository.manifest()).createPullRequests();
+          expect(
+            repository.pulls
+              .filter(pr => !pr.sha)
+              .map(pr => pr.title)
+              .sort()
+          ).to.eql(expectedPending);
+          repository.merge(repository.open('c'));
+          await (await repository.manifest()).createReleases();
+          await (await repository.manifest()).createPullRequests();
+          repository.merge(repository.open('b'));
+          await (await repository.manifest()).createReleases();
+          expect(
+            await (await repository.manifest()).createPullRequests()
+          ).to.eql([]);
+        } finally {
+          repository.dispose();
+        }
+      });
+    }
+    // A registry alias must not release consumers of an unrelated registry package.
+    it('excludes registry aliases whose key matches a workspace package', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'npm:other@^1.0.0'
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls.map(pr => pr.title)).to.eql([
+          'chore(main): release c 1.1.0',
+        ]);
+      } finally {
+        repository.dispose();
+      }
+    });
+    // A library release must not strand pending consumers or release one twice.
+    for (const range of [
+      'workspace:^',
+      'workspace:*',
+      'workspace:~',
+      'workspace:^1.0.0',
+      'file:../c',
+      'link:../c',
+      'file:../c-9.0.0',
+      'link:../c-9.0.0',
+      '^1.0.0',
+      '~1.0.0',
+      '1.0.0',
+    ]) {
+      for (const order of [
+        ['c', 'a', 'b'],
+        ['a', 'c', 'b'],
+      ]) {
+        it(`completes the ${order.join(
+          '-'
+        )} lifecycle with ${range} without generated state repairs`, async function () {
+          this.timeout(30000);
+          const repository = new WorkspaceRepository(github, sandbox, range);
+          try {
+            repository.change('c', 'feat: add library feature');
+            await (await repository.manifest()).createPullRequests();
+            const expectedVersions: Record<string, string> = {
+              'packages/a': '1.0.0',
+              'packages/b': '1.0.0',
+              'packages/c': '1.0.0',
+              'packages/unrelated': '1.0.0',
+              'packages/simple': '1.0.0',
+            };
+            expect(repository.pulls.map(pr => pr.labels)).to.eql([
+              repository.labels,
+              repository.labels,
+              repository.labels,
+            ]);
+            for (const name of order) {
+              const pr = repository.open(name);
+              const version = name === 'c' ? '1.1.0' : '1.0.1';
+              expect(
+                repository.json(
+                  '.release-please-manifest.json',
+                  pr.headBranchName
+                )
+              ).to.eql({...expectedVersions, [`packages/${name}`]: version});
+              if (name !== 'c') {
+                expect(pr.body).to.include('c bumped');
+                expect(pr.body).to.include('1.1.0');
+              }
+              if (/^(file|link):/.test(range)) {
+                for (const consumer of ['a', 'b']) {
+                  expect(
+                    repository.json(
+                      `packages/${consumer}/package.json`,
+                      pr.headBranchName
+                    ).dependencies.c
+                  ).to.equal(range);
+                  expect(
+                    repository.json('package-lock.json', pr.headBranchName)
+                      .packages[`packages/${consumer}`].dependencies.c
+                  ).to.equal(range);
+                }
+              }
+              repository.merge(pr);
+              expectedVersions[`packages/${name}`] = version;
+              expect(repository.json('.release-please-manifest.json')).to.eql(
+                expectedVersions
+              );
+              const releases = await (
+                await repository.manifest()
+              ).createReleases();
+              expect(releases.map(release => release!.tagName)).to.eql([
+                `${name}-v${version}`,
+              ]);
+              expect(pr.labels).to.eql(['autorelease: tagged']);
+              repository.refreshes.length = 0;
+              await (await repository.manifest()).createPullRequests();
+              for (const pending of repository.pulls.filter(
+                item => !item.sha
+              )) {
+                expect(repository.refreshes).to.include(pending.number);
+              }
+              expect(repository.pulls).lengthOf(3);
+            }
+            for (let run = 0; run < 2; run++) {
+              expect(
+                await (await repository.manifest()).createPullRequests()
+              ).to.eql([]);
+              expect(
+                await (await repository.manifest()).createReleases()
+              ).to.eql([]);
+            }
+            expect(repository.pulls.filter(pr => !pr.sha)).to.eql([]);
+            repository.change('a', 'fix: independent consumer change');
+            repository.change('unrelated', 'fix: independent node change');
+            repository.change('simple', 'fix: independent simple change');
+            await (await repository.manifest()).createPullRequests();
+            expect(repository.open('a').title).to.include('1.0.2');
+            expect(repository.open('unrelated').title).to.include('1.0.1');
+            expect(repository.open('simple').title).to.include('1.0.1');
+          } finally {
+            repository.dispose();
+          }
+        });
+      }
+    }
+    // A second library change must not leave pending consumer notes stale or replace their pull requests.
+    it('refreshes pending consumer pull requests after another library change', async function () {
+      this.timeout(30000);
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls.length).to.eql(3);
+        expect(repository.pulls.map(pr => pr.title).sort()).to.eql([
+          'chore(main): release a 1.0.1',
+          'chore(main): release b 1.0.1',
+          'chore(main): release c 1.1.0',
+        ]);
+        const numbers: Record<string, number> = {};
+        for (const name of ['a', 'b', 'c']) {
+          numbers[name] = repository.open(name).number;
+        }
+        const initialBodies: Record<string, string> = {};
+        for (const name of ['a', 'b']) {
+          initialBodies[name] = repository.open(name).body;
+          expect(initialBodies[name]).to.include('c bumped to 1.1.0');
+        }
+        repository.refreshes.length = 0;
+
+        repository.change('c', 'feat!: change the library contract');
+        await (await repository.manifest()).createPullRequests();
+
+        const base = repository.json('.release-please-manifest.json');
+        // The library pull request proposes the breaking version in place.
+        const library = repository.open('c');
+        expect(library.title).to.eql('chore(main): release c 2.0.0');
+        expect(
+          repository.json(
+            '.release-please-manifest.json',
+            library.headBranchName
+          )
+        ).to.eql({...base, 'packages/c': '2.0.0'});
+        // Every pending pull request keeps its original number.
+        expect(repository.pulls.map(pr => pr.number).sort()).to.eql(
+          Object.values(numbers).sort()
+        );
+        for (const name of ['a', 'b']) {
+          const consumer = repository.open(name);
+          expect(consumer.number).to.eql(numbers[name]);
+          expect(repository.refreshes).to.include(numbers[name]);
+          // The refreshed note names the new library version.
+          expect(consumer.body).to.include('c bumped to 2.0.0');
+          expect(consumer.body).to.not.include('c bumped to 1.1.0');
+          expect(consumer.body).to.not.eql(initialBodies[name]);
+          // The consumer proposes only its own manifest entry.
+          expect(
+            repository.json(
+              '.release-please-manifest.json',
+              consumer.headBranchName
+            )
+          ).to.eql({...base, [`packages/${name}`]: '1.0.1'});
+        }
+        // The open pull requests remain exactly the two consumers and the library.
+        expect(
+          repository.pulls
+            .filter(pr => !pr.sha)
+            .map(pr => pr.headBranchName.split('--components--')[1])
+            .sort()
+        ).to.eql(['a', 'b', 'c']);
+
+        // A repeated generation without new commits changes nothing.
+        const state = repository.pulls.map(pr => ({
+          number: pr.number,
+          title: pr.title,
+          body: pr.body,
+        }));
+        await (await repository.manifest()).createPullRequests();
+        expect(repository.pulls.map(pr => pr.number).sort()).to.eql(
+          Object.values(numbers).sort()
+        );
+        for (const pr of repository.pulls) {
+          const before = state.find(item => item.number === pr.number)!;
+          expect(pr.title).to.eql(before.title);
+          expect(pr.body).to.eql(before.body);
+        }
+        for (const name of ['a', 'b']) {
+          expect(
+            repository.json(
+              '.release-please-manifest.json',
+              repository.open(name).headBranchName
+            )
+          ).to.eql({...base, [`packages/${name}`]: '1.0.1'});
+        }
+      } finally {
+        repository.dispose();
+      }
+    });
     it('should version bump dependencies together', async () => {
       // Scenario:
       //   - package a,b depends on c
@@ -123,6 +573,9 @@ describe('Plugin compatibility', () => {
           ],
         ],
       });
+      (github.getFileContentsOnBranch as sinon.SinonStub).rejects(
+        new FileNotFoundError('missing')
+      );
       sandbox
         .stub(github, 'findFilesByGlobAndRef')
         .withArgs('packages/node1', 'main')

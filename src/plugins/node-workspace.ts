@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {posix} from 'path';
 import {Scm} from '../scm';
 import {CandidateReleasePullRequest, RepositoryConfig} from '../manifest';
 import {PackageLockJson} from '../updaters/node/package-lock-json';
@@ -33,9 +34,16 @@ import {Strategy} from '../strategy';
 import {Commit} from '../commit';
 import {Release} from '../release';
 import {CompositeUpdater} from '../updaters/composite';
-import {PackageJson, newVersionWithRange} from '../updaters/node/package-json';
+import {
+  PackageJson,
+  newVersionWithRange,
+  NPM_PROTOCOL_REGEXP,
+} from '../updaters/node/package-json';
 import {Logger} from '../util/logger';
 import {PatchVersionUpdate} from '../versioning-strategy';
+import * as semver from 'semver';
+import {FileNotFoundError} from '../errors';
+import {TagName} from '../util/tag-name';
 
 interface ParsedPackageJson {
   name: string;
@@ -74,6 +82,14 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
 
   private strategiesByPath: Record<string, Strategy> = {};
   private releasesByPath: Record<string, Release> = {};
+  private candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
+  private acknowledgedVersions = new Map<string, VersionsMap>();
+  private dependencyVersions: VersionsMap = new Map();
+  private packagesByPath = new Map<string, Package>();
+  private componentTagVersionsByComponent = new Map<string, Set<string>>();
+  private componentTagVersionsLoaded = false;
+  private componentByPath = new Map<string, string>();
+  private sharedChangelogPaths = new Set<string>();
 
   readonly updatePeerDependencies: boolean;
   constructor(
@@ -86,6 +102,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
 
     this.alwaysLinkLocal = options.alwaysLinkLocal === false ? false : true;
     this.updatePeerDependencies = options.updatePeerDependencies === true;
+    this.runWithoutCandidates = !this.merge;
   }
   protected async buildAllPackages(
     candidates: CandidateReleasePullRequest[]
@@ -162,6 +179,8 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       }
     }
     const allPackages = Array.from(packagesByPath.values());
+    this.candidatesByPackage = candidatesByPackage;
+    this.packagesByPath = packagesByPath;
     return {
       allPackages,
       candidatesByPackage,
@@ -181,6 +200,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     pkg: Package,
     updatedVersions: VersionsMap
   ): CandidateReleasePullRequest {
+    updatedVersions = this.versionsForPackage(pkg, updatedVersions);
     // Update version of the package
     const newVersion = updatedVersions.get(pkg.name);
     if (!newVersion) {
@@ -254,6 +274,7 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     pkg: Package,
     updatedVersions: VersionsMap
   ): Promise<CandidateReleasePullRequest> {
+    updatedVersions = this.versionsForPackage(pkg, updatedVersions);
     // Update version of the package
     const newVersion = updatedVersions.get(pkg.name);
     if (!newVersion) {
@@ -360,6 +381,29 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     if (candidates.length === 0) {
       return candidates;
     }
+    if (!this.merge) {
+      for (const candidate of candidates) {
+        const pkg = this.packagesByPath.get(candidate.path)!;
+        const updater = new PackageLockJson({
+          version: pkg.path === '.' ? candidate.pullRequest.version : undefined,
+          versionsMap: this.versionsForPackage(pkg, _updatedVersions),
+          workspacePackage: pkg.name,
+        });
+        const existing = candidate.pullRequest.updates.find(
+          update => update.path === 'package-lock.json'
+        );
+        if (existing) {
+          existing.updater = updater;
+        } else {
+          candidate.pullRequest.updates.push({
+            path: 'package-lock.json',
+            createIfMissing: false,
+            updater,
+          });
+        }
+      }
+      return candidates;
+    }
 
     const [candidate] = candidates;
 
@@ -401,9 +445,13 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       allPackages.map(packageJson => packageJson.name)
     );
     for (const packageJson of allPackages) {
-      const allDeps = Object.keys(this.combineDeps(packageJson));
-      const workspaceDeps = allDeps.filter(dep =>
-        workspacePackageNames.has(dep)
+      const dependencies = this.combineDeps(packageJson);
+      const workspaceDeps = Object.keys(dependencies).filter(
+        dep =>
+          workspacePackageNames.has(dep) &&
+          (this.merge ||
+            !NPM_PROTOCOL_REGEXP.test(dependencies[dep]) ||
+            /^(workspace|file|link):/.test(dependencies[dep]))
       );
       graph.set(packageJson.name, {
         deps: workspaceDeps,
@@ -411,7 +459,294 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
       });
     }
 
+    this.acknowledgedVersions.clear();
+    this.componentTagVersionsByComponent.clear();
+    this.componentTagVersionsLoaded = false;
+    this.componentByPath.clear();
+    this.sharedChangelogPaths.clear();
+    if (!this.merge) {
+      const componentsByChangelog = new Map<string, Set<string>>();
+      for (const [path, strategy] of Object.entries(this.strategiesByPath)) {
+        const component = (await strategy.getComponent()) || '';
+        this.componentByPath.set(path, component);
+        const changelogPath = this.changelogPathForPackage(path);
+        let components = componentsByChangelog.get(changelogPath);
+        if (!components) {
+          components = new Set();
+          componentsByChangelog.set(changelogPath, components);
+        }
+        components.add(component);
+      }
+      for (const [path, components] of componentsByChangelog) {
+        if (components.size > 1) this.sharedChangelogPaths.add(path);
+      }
+      for (const [name, {value: pkg, deps}] of graph) {
+        const versions: VersionsMap = new Map();
+        const noteVersions = this.dependencyNoteVersions(
+          await this.acknowledgmentNotes(
+            pkg,
+            this.componentByPath.get(pkg.path) || ''
+          )
+        );
+        for (const dep of deps) {
+          versions.set(
+            dep,
+            await this.acknowledgedDependencyVersion(
+              pkg,
+              graph.get(dep)!.value,
+              this.combineDeps(pkg)[dep],
+              noteVersions.get(dep)
+            )
+          );
+        }
+        this.acknowledgedVersions.set(name, versions);
+      }
+    }
     return graph;
+  }
+
+  protected buildGraphOrder(
+    graph: DependencyGraph<Package>,
+    packageNamesToUpdate: string[]
+  ): Package[] {
+    if (this.merge) {
+      return super.buildGraphOrder(graph, packageNamesToUpdate);
+    }
+    const selected = new Set(packageNamesToUpdate);
+    this.dependencyVersions = new Map();
+    for (const [name, {value: pkg}] of graph) {
+      const candidate = this.candidatesByPackage[name];
+      const version =
+        candidate?.pullRequest.version ??
+        (selected.has(name)
+          ? this.bumpVersion(pkg)
+          : this.releasesByPath[pkg.path]?.tag.version);
+      if (version) this.dependencyVersions.set(name, version);
+    }
+    // Continue until transitive dependents have seen every proposed version.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [name, {value: pkg, deps}] of graph) {
+        if (selected.has(name)) continue;
+        if (
+          deps.some(dep => {
+            const target = this.dependencyVersions.get(dep);
+            const acknowledged = this.acknowledgedVersions.get(name)?.get(dep);
+            if (!target) return false;
+            return (
+              acknowledged &&
+              semver.gt(target.toString(), acknowledged.toString())
+            );
+          })
+        ) {
+          selected.add(name);
+          this.dependencyVersions.set(name, this.bumpVersion(pkg));
+          changed = true;
+        }
+      }
+    }
+    return super
+      .buildGraphOrder(graph, [...selected])
+      .filter(pkg => selected.has(pkg.name));
+  }
+
+  protected async buildUpdatedVersions(
+    graph: DependencyGraph<Package>,
+    orderedPackages: Package[],
+    candidatesByPackage: Record<string, CandidateReleasePullRequest>
+  ): Promise<{updatedVersions: VersionsMap; updatedPathVersions: VersionsMap}> {
+    const result = await super.buildUpdatedVersions(
+      graph,
+      orderedPackages,
+      candidatesByPackage
+    );
+    if (!this.merge) {
+      for (const [name, version] of this.dependencyVersions) {
+        if (!result.updatedVersions.has(name))
+          result.updatedVersions.set(name, version);
+      }
+    }
+    return result;
+  }
+
+  private versionsForPackage(pkg: Package, versions: VersionsMap): VersionsMap {
+    if (this.merge) return versions;
+    const result: VersionsMap = new Map();
+    const ownVersion = versions.get(pkg.name);
+    if (ownVersion) result.set(pkg.name, ownVersion);
+    for (const dep of Object.keys(this.combineDeps(pkg))) {
+      const target = versions.get(dep);
+      const acknowledged = this.acknowledgedVersions.get(pkg.name)?.get(dep);
+      if (
+        target &&
+        acknowledged &&
+        semver.gt(target.toString(), acknowledged.toString())
+      ) {
+        result.set(dep, target);
+      }
+    }
+    return result;
+  }
+
+  private changelogPathForPackage(path: string): string {
+    const configuredPath =
+      this.repositoryConfig[path].changelogPath ?? 'CHANGELOG.md';
+    return configuredPath.startsWith('/')
+      ? posix.normalize(configuredPath).replace(/^\/+/, '')
+      : posix.normalize(addPath(path, configuredPath));
+  }
+
+  private async acknowledgmentNotes(
+    pkg: Package,
+    component: string
+  ): Promise<string> {
+    const release = this.releasesByPath[pkg.path];
+    if (!release) return '';
+    let notes = release.notes;
+    if (release.sha) {
+      const changelogPath = this.changelogPathForPackage(pkg.path);
+      try {
+        const contents = await this.github.getFileContentsOnBranch(
+          changelogPath,
+          release.sha
+        );
+        notes +=
+          '\n' +
+          (await this.releaseChangelogNotes(
+            contents.parsedContent,
+            component,
+            this.sharedChangelogPaths.has(changelogPath)
+          ));
+      } catch (error) {
+        if (!(error instanceof FileNotFoundError)) throw error;
+      }
+    }
+    return notes;
+  }
+
+  private async loadComponentTagVersions(): Promise<void> {
+    if (this.componentTagVersionsLoaded) return;
+    for await (const tag of this.github.tagIterator()) {
+      const parsed = TagName.parse(tag.name);
+      if (!parsed?.component) continue;
+      let versions = this.componentTagVersionsByComponent.get(parsed.component);
+      if (!versions) {
+        versions = new Set();
+        this.componentTagVersionsByComponent.set(parsed.component, versions);
+      }
+      versions.add(parsed.version.toString());
+    }
+    this.componentTagVersionsLoaded = true;
+  }
+
+  private async releaseChangelogNotes(
+    changelog: string,
+    component: string,
+    shared: boolean
+  ): Promise<string> {
+    const lines = changelog.split('\n');
+    const sections: string[] = [];
+    let retaining = false;
+    for (const line of lines) {
+      if (!shared) {
+        if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) {
+          retaining = true;
+        } else if (/^##\s/.test(line)) {
+          retaining = false;
+        }
+      } else {
+        const heading = line.match(/^##\s+\[?([^\]\s(]+)/);
+        if (heading) {
+          const headingTag = heading[1];
+          const parsedHeading = TagName.parse(headingTag);
+          const linkTag = line.match(/\.\.\.([^)\s]+)/)?.[1];
+          const tagged = [linkTag, headingTag]
+            .filter((tag): tag is string => !!tag)
+            .map(tag => TagName.parse(tag))
+            .find(tag => !!tag?.component);
+          if (tagged) {
+            retaining = tagged.component === component;
+          } else if (parsedHeading) {
+            await this.loadComponentTagVersions();
+            retaining =
+              this.componentTagVersionsByComponent
+                .get(component)
+                ?.has(parsedHeading.version.toString()) === true;
+          } else {
+            retaining = false;
+          }
+        }
+      }
+      if (retaining) sections.push(line);
+    }
+    return sections.join('\n');
+  }
+
+  private dependencyNoteVersions(notes: string): VersionsMap {
+    const versions: VersionsMap = new Map();
+    for (const line of notes.split('\n')) {
+      const trimmed = line.trim();
+      const marker = trimmed.indexOf(' bumped ');
+      if (!trimmed.startsWith('* ') || marker < 0) continue;
+      const recorded = semver.valid(
+        trimmed
+          .slice(trimmed.lastIndexOf(' to ') + 4)
+          .replace(/^[~^<>= ]+/, '')
+          .trim()
+      );
+      if (recorded) {
+        const name = trimmed.slice(2, marker);
+        const existing = versions.get(name);
+        if (!existing || semver.gt(recorded, existing.toString())) {
+          versions.set(name, Version.parse(recorded));
+        }
+      }
+    }
+    return versions;
+  }
+
+  private async acknowledgedDependencyVersion(
+    pkg: Package,
+    dependency: Package,
+    range: string,
+    recordedVersion?: Version
+  ): Promise<Version> {
+    const release = this.releasesByPath[pkg.path];
+    const dependencyRange = range.replace(/^workspace:/, '');
+    const localProtocol = /^(file|link):/.test(range);
+    let version = localProtocol
+      ? undefined
+      : semver.valid(dependencyRange.replace(/^[~^<>= ]+/, '')) ??
+        semver.coerce(dependencyRange)?.version;
+    // Local paths and workspace shorthand do not store a dependency version.
+    // Notes record proposed versions even when the consumer is merged first.
+    const versionless =
+      localProtocol || (range.startsWith('workspace:') && !version);
+    if (versionless) {
+      version = dependency.version;
+    }
+    if (release?.sha) {
+      try {
+        const contents = await this.github.getFileContentsOnBranch(
+          addPath(dependency.path, 'package.json'),
+          release.sha
+        );
+        const released = JSON.parse(contents.parsedContent).version;
+        if (versionless || !version || semver.gt(released, version)) {
+          version = released;
+        }
+      } catch (error) {
+        if (!(error instanceof FileNotFoundError)) throw error;
+      }
+    }
+    if (
+      recordedVersion &&
+      (!version || semver.gt(recordedVersion.toString(), version))
+    ) {
+      version = recordedVersion.toString();
+    }
+    return Version.parse(version ?? dependency.version);
   }
 
   protected inScope(candidate: CandidateReleasePullRequest): boolean {

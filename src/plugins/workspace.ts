@@ -35,6 +35,7 @@ export interface WorkspacePluginOptions {
   manifestPath?: string;
   updateAllPackages?: boolean;
   merge?: boolean;
+  labels?: string[];
   logger?: Logger;
 }
 
@@ -57,7 +58,9 @@ export interface AllPackages<T> {
 export abstract class WorkspacePlugin<T> extends ManifestPlugin {
   private updateAllPackages: boolean;
   private manifestPath: string;
-  private merge: boolean;
+  protected readonly merge: boolean;
+  protected runWithoutCandidates = false;
+  private labels: string[];
   constructor(
     github: Scm,
     targetBranch: string,
@@ -68,6 +71,7 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
     this.manifestPath = options.manifestPath ?? DEFAULT_RELEASE_PLEASE_MANIFEST;
     this.updateAllPackages = options.updateAllPackages ?? false;
     this.merge = options.merge ?? true;
+    this.labels = options.labels ?? [];
   }
   async run(
     candidates: CandidateReleasePullRequest[]
@@ -91,7 +95,7 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
     );
 
     this.logger.info(`Found ${inScopeCandidates.length} in-scope releases`);
-    if (inScopeCandidates.length === 0) {
+    if (inScopeCandidates.length === 0 && !this.runWithoutCandidates) {
       return outOfScopeCandidates;
     }
 
@@ -162,8 +166,17 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
         } else {
           newCandidatePaths.add(newCandidate.path);
           newCandidates.push(newCandidate);
+          for (const label of this.labels) {
+            if (!newCandidate.pullRequest.labels.includes(label)) {
+              newCandidate.pullRequest.labels.push(label);
+            }
+          }
         }
       }
+    }
+
+    if (newCandidates.length === 0) {
+      return outOfScopeCandidates;
     }
 
     if (this.merge) {
@@ -176,15 +189,31 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
       newCandidates = await mergePlugin.run(newCandidates);
     }
 
-    const newUpdates = newCandidates[0].pullRequest.updates;
-    newUpdates.push({
-      path: this.manifestPath,
-      createIfMissing: false,
-      updater: new ReleasePleaseManifest({
-        version: newCandidates[0].pullRequest.version!,
-        versionsMap: updatedPathVersions,
-      }),
-    });
+    for (const candidate of newCandidates) {
+      const versionsMap = this.merge
+        ? updatedPathVersions
+        : new Map(
+            updatedPathVersions.has(candidate.path)
+              ? [[candidate.path, updatedPathVersions.get(candidate.path)!]]
+              : []
+          );
+      if (
+        versionsMap.size > 0 &&
+        (this.merge ||
+          !candidate.pullRequest.updates.some(
+            update => update.path === this.manifestPath
+          ))
+      ) {
+        candidate.pullRequest.updates.push({
+          path: this.manifestPath,
+          createIfMissing: false,
+          updater: new ReleasePleaseManifest({
+            version: candidate.pullRequest.version!,
+            versionsMap,
+          }),
+        });
+      }
+    }
 
     this.logger.info(
       `Post-processing ${newCandidates.length} in-scope candidates`

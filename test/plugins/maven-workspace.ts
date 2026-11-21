@@ -404,6 +404,79 @@ describe('MavenWorkspace plugin', () => {
       );
       safeSnapshot(await renderUpdate(github, bomUpdate));
     });
+    it('does not duplicate manifest updates for separate candidates', async () => {
+      plugin = new MavenWorkspace(
+        github,
+        'main',
+        {
+          bom: {
+            releaseType: 'maven',
+          },
+          maven1: {
+            releaseType: 'maven',
+          },
+          maven2: {
+            releaseType: 'maven',
+          },
+          maven3: {
+            releaseType: 'maven',
+          },
+          maven4: {
+            releaseType: 'maven',
+          },
+        },
+        {merge: false}
+      );
+      const candidateVersion = Version.parse('1.1.2');
+      const candidates: CandidateReleasePullRequest[] = [
+        buildMockCandidatePullRequest('maven1', 'maven', '1.1.2', {
+          component: 'maven1',
+          updates: [
+            buildMockPackageUpdate('maven1/pom.xml', 'maven1/pom.xml', '1.1.2'),
+            {
+              path: '.release-please-manifest.json',
+              createIfMissing: false,
+              updater: new ReleasePleaseManifest({
+                version: candidateVersion,
+                versionsMap: new Map([['maven1', candidateVersion]]),
+              }),
+            },
+          ],
+        }),
+      ];
+      sandbox
+        .stub(github, 'findFilesByFilenameAndRef')
+        .withArgs('pom.xml', 'main')
+        .resolves([
+          'maven1/pom.xml',
+          'maven2/pom.xml',
+          'maven3/pom.xml',
+          'maven4/pom.xml',
+        ]);
+      stubFilesFromFixtures({
+        sandbox,
+        github,
+        fixturePath: fixturesPath,
+        files: [
+          'maven1/pom.xml',
+          'maven2/pom.xml',
+          'maven3/pom.xml',
+          'maven4/pom.xml',
+        ],
+        flatten: false,
+        targetBranch: 'main',
+      });
+      const newCandidates = await plugin.run(candidates);
+
+      expect(newCandidates).length(4);
+      for (const candidate of newCandidates) {
+        expect(
+          candidate.pullRequest.updates.filter(
+            update => update.path === '.release-please-manifest.json'
+          )
+        ).length(1);
+      }
+    });
     it('skips updating manifest with snapshot versions', async () => {
       plugin = new MavenWorkspace(github, 'main', {
         bom: {
@@ -473,6 +546,14 @@ describe('MavenWorkspace plugin', () => {
           ],
         }),
       ];
+      // Snapshot proposals must preserve the published manifest, not publish snapshots.
+      const publishedVersions = {
+        maven1: '1.1.1',
+        maven2: '2.2.2',
+        maven3: '3.3.3',
+        maven4: '4.4.4',
+      };
+      const publishedManifest = JSON.stringify(publishedVersions);
       stubFilesFromFixtures({
         sandbox,
         github,
@@ -485,18 +566,16 @@ describe('MavenWorkspace plugin', () => {
         ],
         flatten: false,
         targetBranch: 'main',
+        inlineFiles: [['.release-please-manifest.json', publishedManifest]],
       });
       const newCandidates = await plugin.run(candidates);
       expect(newCandidates).length(1);
-      const update = assertHasUpdate(
+      const changes = await github.buildChangeSet(
         newCandidates[0].pullRequest.updates,
-        '.release-please-manifest.json',
-        ReleasePleaseManifest
+        'main'
       );
-      const updater = update.updater as ReleasePleaseManifest;
-      for (const [_, version] of updater.versionsMap!) {
-        expect(version.toString()).to.not.include('SNAPSHOT');
-      }
+      const manifest = changes.get('.release-please-manifest.json')?.content;
+      expect(manifest).to.be.undefined;
     });
   });
 });

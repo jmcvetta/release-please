@@ -268,6 +268,39 @@ The first is the `preconfigure` hook, which allows making changes to a `Strategy
 configuration. The second is the `run` (post-processor) hook, which allows making changes
 to candidate release pull requests before they are created.
 
+With `node-workspace` in separate-PR mode (`merge: false`), each candidate owns
+only its component's manifest entry and root lockfile package version. The
+plugin compares proposed and released dependency versions with the versions
+already consumed by each dependent release. Concrete dependency ranges,
+dependency release notes, and the package files at the dependent's release SHA
+provide that history. Release notes matter for `workspace:*`, `workspace:^`,
+`workspace:~`, `file:`, and `link:`: these declarations do not record a version,
+and a consumer can be released before the library version named in its notes.
+Local paths are never interpreted as semantic versions. `file:` and `link:`
+dependencies form workspace edges only when their keys name configured workspace
+packages. Their declarations remain unchanged in package files and lockfiles.
+`npm:` registry aliases are excluded in separate mode even when their keys
+match workspace package names, because the alias can resolve to another package.
+Combined-mode graph behavior is unchanged.
+
+When consumers share a `changelogPath`, the plugin scopes versioned sections
+to the owning component using component tags in the heading or compare link.
+For headings without a component tag, it retains only versions present in that
+component's tags. If shared changelog headings and tags contain no component
+information, those sections are excluded conservatively; acknowledgment then
+falls back to release notes and the consumer's package state.
+When scanning a component-specific changelog, a later unversioned level-two
+heading ends the release section, so notes below it cannot acknowledge a
+dependency update.
+
+The workspace pass also runs without a new Node candidate. A library that was
+released first can therefore keep its pending consumers current. A consumer
+that already acknowledged that library version does not receive another
+dependency-only release. Versions already available at the consumer's latest
+release are also acknowledged, so an old release outside a concrete range does
+not force dependency-only releases on every run. Independent releasable
+commits still create releases.
+
 ### Configuration schemas
 
 We provide JSON-schema representations of both the manifest config and manifest versions
