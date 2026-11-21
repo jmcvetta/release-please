@@ -289,6 +289,9 @@ For headings without a component tag, it retains only versions present in that
 component's tags. If shared changelog headings and tags contain no component
 information, those sections are excluded conservatively; acknowledgment then
 falls back to release notes and the consumer's package state.
+When scanning a component-specific changelog, a later unversioned level-two
+heading ends the release section, so notes below it cannot acknowledge a
+dependency update.
 
 The workspace pass also runs without a new Node candidate. A library that was
 released first can therefore keep its pending consumers current. A consumer

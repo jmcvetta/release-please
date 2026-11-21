@@ -650,7 +650,11 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     let retaining = false;
     for (const line of lines) {
       if (!shared) {
-        if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) retaining = true;
+        if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) {
+          retaining = true;
+        } else if (/^##\s/.test(line)) {
+          retaining = false;
+        }
       } else {
         const heading = line.match(/^##\s+\[?([^\]\s(]+)/);
         if (heading) {
