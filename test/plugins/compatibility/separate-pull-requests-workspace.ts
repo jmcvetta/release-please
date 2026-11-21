@@ -232,9 +232,9 @@ describe('Plugin compatibility', () => {
           await (await repository.manifest()).createPullRequests();
           repository.merge(repository.open('b'));
           await (await repository.manifest()).createReleases();
-          expect(await (await repository.manifest()).createPullRequests()).to.eql(
-            []
-          );
+          expect(
+            await (await repository.manifest()).createPullRequests()
+          ).to.eql([]);
         } finally {
           repository.dispose();
         }
