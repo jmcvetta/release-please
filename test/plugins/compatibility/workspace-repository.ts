@@ -15,7 +15,7 @@
 import {execFileSync} from 'child_process';
 import {mkdirSync, mkdtempSync, writeFileSync, rmSync} from 'fs';
 import {tmpdir} from 'os';
-import {dirname, join} from 'path';
+import {dirname, join, normalize} from 'path';
 import * as sinon from 'sinon';
 import {GitHub, GitHubRelease} from '../../../src/github';
 import {Manifest} from '../../../src/manifest';
@@ -42,7 +42,8 @@ export class WorkspaceRepository {
     separate = true,
     readonly labels = ['autorelease: pending'],
     initialLibraryVersion = '1.0.0',
-    initialChangelog = '# Changelog\n'
+    initialChangelog = '# Changelog\n',
+    sharedChangelog = false
   ) {
     this.git('init', '--initial-branch=main');
     this.git('config', 'user.name', 'Release fixture');
@@ -51,6 +52,9 @@ export class WorkspaceRepository {
       'package.json',
       JSON.stringify({private: true, workspaces: ['packages/*']})
     );
+    if (sharedChangelog) {
+      this.write('packages/CHANGELOG.md', initialChangelog);
+    }
     const packages: Record<string, object> = {};
     const versions: Record<string, string> = {};
     for (const name of ['a', 'b', 'c', 'unrelated', 'simple']) {
@@ -58,6 +62,9 @@ export class WorkspaceRepository {
       packages[path] = {
         component: name,
         'release-type': name === 'simple' ? 'simple' : 'node',
+        ...(['a', 'b'].includes(name) && sharedChangelog
+          ? {'changelog-path': '/packages/CHANGELOG.md'}
+          : {}),
       };
       versions[path] = name === 'c' ? initialLibraryVersion : '1.0.0';
       this.write(`${path}/CHANGELOG.md`, initialChangelog);
@@ -131,7 +138,9 @@ export class WorkspaceRepository {
       .stub(github, 'getFileContentsOnBranch')
       .callsFake(async (path, ref) => {
         try {
-          return buildGitHubFileRaw(this.git('show', `${ref}:${path}`));
+          return buildGitHubFileRaw(
+            this.git('show', `${ref}:${normalize(path)}`)
+          );
         } catch {
           throw new FileNotFoundError(path);
         }

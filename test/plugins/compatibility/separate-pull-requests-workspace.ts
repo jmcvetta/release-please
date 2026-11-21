@@ -150,6 +150,57 @@ describe('Plugin compatibility', () => {
         repository.dispose();
       }
     });
+    it('scopes shared changelog acknowledgments to their component', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/b-v1.0.0...b-v1.0.0) (2026-01-01)\n\n* c bumped to 1.1.0\n',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        const components = candidates.map(
+          candidate => candidate.body.releaseData[0].component
+        );
+        expect(components).to.include('a');
+        const candidate = candidates.find(
+          candidate => candidate.body.releaseData[0].component === 'a'
+        )!;
+        expect(candidate.body.toString()).to.include('c bumped to 1.1.0');
+      } finally {
+        repository.dispose();
+      }
+    });
+    it('retains acknowledgments in the consumer shared changelog section', async () => {
+      const repository = new WorkspaceRepository(
+        github,
+        sandbox,
+        'workspace:^',
+        true,
+        ['autorelease: pending'],
+        '1.0.0',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/a-v1.0.0...a-v1.0.0) (2026-01-01)\n\n* c bumped to 1.1.0\n',
+        true
+      );
+      try {
+        repository.change('c', 'feat: add library feature');
+        const candidates = await (
+          await repository.manifest()
+        ).buildPullRequests();
+        expect(
+          candidates.map(candidate => candidate.body.releaseData[0].component)
+        ).not.to.include('a');
+      } finally {
+        repository.dispose();
+      }
+    });
     // Notes outside versioned release sections must not suppress a needed update.
     it('ignores stale dependency notes outside release sections', async () => {
       const repository = new WorkspaceRepository(

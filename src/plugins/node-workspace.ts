@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {normalize} from 'path';
 import {Scm} from '../scm';
 import {CandidateReleasePullRequest, RepositoryConfig} from '../manifest';
 import {PackageLockJson} from '../updaters/node/package-lock-json';
@@ -42,6 +43,7 @@ import {Logger} from '../util/logger';
 import {PatchVersionUpdate} from '../versioning-strategy';
 import * as semver from 'semver';
 import {FileNotFoundError} from '../errors';
+import {TagName} from '../util/tag-name';
 
 interface ParsedPackageJson {
   name: string;
@@ -84,6 +86,10 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
   private acknowledgedVersions = new Map<string, VersionsMap>();
   private dependencyVersions: VersionsMap = new Map();
   private packagesByPath = new Map<string, Package>();
+  private componentTagVersionsByComponent = new Map<string, Set<string>>();
+  private componentTagVersionsLoaded = false;
+  private componentByPath = new Map<string, string>();
+  private sharedChangelogPaths = new Set<string>();
 
   readonly updatePeerDependencies: boolean;
   constructor(
@@ -454,11 +460,33 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     }
 
     this.acknowledgedVersions.clear();
+    this.componentTagVersionsByComponent.clear();
+    this.componentTagVersionsLoaded = false;
+    this.componentByPath.clear();
+    this.sharedChangelogPaths.clear();
     if (!this.merge) {
+      const componentsByChangelog = new Map<string, Set<string>>();
+      for (const [path, strategy] of Object.entries(this.strategiesByPath)) {
+        const component = (await strategy.getComponent()) || '';
+        this.componentByPath.set(path, component);
+        const changelogPath = this.changelogPathForPackage(path);
+        let components = componentsByChangelog.get(changelogPath);
+        if (!components) {
+          components = new Set();
+          componentsByChangelog.set(changelogPath, components);
+        }
+        components.add(component);
+      }
+      for (const [path, components] of componentsByChangelog) {
+        if (components.size > 1) this.sharedChangelogPaths.add(path);
+      }
       for (const [name, {value: pkg, deps}] of graph) {
         const versions: VersionsMap = new Map();
         const noteVersions = this.dependencyNoteVersions(
-          await this.acknowledgmentNotes(pkg)
+          await this.acknowledgmentNotes(
+            pkg,
+            this.componentByPath.get(pkg.path) || ''
+          )
         );
         for (const dep of deps) {
           versions.set(
@@ -561,20 +589,35 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     return result;
   }
 
-  private async acknowledgmentNotes(pkg: Package): Promise<string> {
+  private changelogPathForPackage(path: string): string {
+    const configuredPath =
+      this.repositoryConfig[path].changelogPath ?? 'CHANGELOG.md';
+    return configuredPath.startsWith('/')
+      ? normalize(configuredPath).replace(/^\/+/, '')
+      : normalize(addPath(path, configuredPath));
+  }
+
+  private async acknowledgmentNotes(
+    pkg: Package,
+    component: string
+  ): Promise<string> {
     const release = this.releasesByPath[pkg.path];
     if (!release) return '';
     let notes = release.notes;
     if (release.sha) {
+      const changelogPath = this.changelogPathForPackage(pkg.path);
       try {
         const contents = await this.github.getFileContentsOnBranch(
-          addPath(
-            pkg.path,
-            this.repositoryConfig[pkg.path].changelogPath ?? 'CHANGELOG.md'
-          ),
+          changelogPath,
           release.sha
         );
-        notes += '\n' + this.releaseChangelogNotes(contents.parsedContent);
+        notes +=
+          '\n' +
+          (await this.releaseChangelogNotes(
+            contents.parsedContent,
+            component,
+            this.sharedChangelogPaths.has(changelogPath)
+          ));
       } catch (error) {
         if (!(error instanceof FileNotFoundError)) throw error;
       }
@@ -582,15 +625,56 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     return notes;
   }
 
-  private releaseChangelogNotes(changelog: string): string {
+  private async loadComponentTagVersions(): Promise<void> {
+    if (this.componentTagVersionsLoaded) return;
+    for await (const tag of this.github.tagIterator()) {
+      const parsed = TagName.parse(tag.name);
+      if (!parsed?.component) continue;
+      let versions = this.componentTagVersionsByComponent.get(parsed.component);
+      if (!versions) {
+        versions = new Set();
+        this.componentTagVersionsByComponent.set(parsed.component, versions);
+      }
+      versions.add(parsed.version.toString());
+    }
+    this.componentTagVersionsLoaded = true;
+  }
+
+  private async releaseChangelogNotes(
+    changelog: string,
+    component: string,
+    shared: boolean
+  ): Promise<string> {
     const lines = changelog.split('\n');
     const sections: string[] = [];
-    let versioned = false;
+    let retaining = false;
     for (const line of lines) {
-      if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) {
-        versioned = true;
+      if (!shared) {
+        if (/^##\s+\[?v?\d+\.\d+\.\d+/.test(line)) retaining = true;
+      } else {
+        const heading = line.match(/^##\s+\[?([^\]\s(]+)/);
+        if (heading) {
+          const headingTag = heading[1];
+          const parsedHeading = TagName.parse(headingTag);
+          const linkTag = line.match(/\.\.\.([^)\s]+)/)?.[1];
+          const tagged = [linkTag, headingTag]
+            .filter((tag): tag is string => !!tag)
+            .map(tag => TagName.parse(tag))
+            .find(tag => !!tag?.component);
+          if (tagged) {
+            retaining = tagged.component === component;
+          } else if (parsedHeading) {
+            await this.loadComponentTagVersions();
+            retaining =
+              this.componentTagVersionsByComponent
+                .get(component)
+                ?.has(parsedHeading.version.toString()) === true;
+          } else {
+            retaining = false;
+          }
+        }
       }
-      if (versioned) sections.push(line);
+      if (retaining) sections.push(line);
     }
     return sections.join('\n');
   }

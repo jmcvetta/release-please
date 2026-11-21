@@ -283,6 +283,13 @@ packages. Their declarations remain unchanged in package files and lockfiles.
 match workspace package names, because the alias can resolve to another package.
 Combined-mode graph behavior is unchanged.
 
+When consumers share a `changelogPath`, the plugin scopes versioned sections
+to the owning component using component tags in the heading or compare link.
+For headings without a component tag, it retains only versions present in that
+component's tags. If shared changelog headings and tags contain no component
+information, those sections are excluded conservatively; acknowledgment then
+falls back to release notes and the consumer's package state.
+
 The workspace pass also runs without a new Node candidate. A library that was
 released first can therefore keep its pending consumers current. A consumer
 that already acknowledged that library version does not receive another
