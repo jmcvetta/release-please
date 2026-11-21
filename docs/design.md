@@ -274,8 +274,14 @@ plugin compares proposed and released dependency versions with the versions
 already consumed by each dependent release. Concrete dependency ranges,
 dependency release notes, and the package files at the dependent's release SHA
 provide that history. Release notes matter for `workspace:*`, `workspace:^`,
-and `workspace:~`: the declarations do not record a version, and a consumer
-can be released before the library version named in its notes.
+`workspace:~`, `file:`, and `link:`: these declarations do not record a version,
+and a consumer can be released before the library version named in its notes.
+Local paths are never interpreted as semantic versions. `file:` and `link:`
+dependencies form workspace edges only when their keys name configured workspace
+packages. Their declarations remain unchanged in package files and lockfiles.
+`npm:` registry aliases are excluded in separate mode even when their keys
+match workspace package names, because the alias can resolve to another package.
+Combined-mode graph behavior is unchanged.
 
 The workspace pass also runs without a new Node candidate. A library that was
 released first can therefore keep its pending consumers current. A consumer
