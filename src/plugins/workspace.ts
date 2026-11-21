@@ -197,7 +197,13 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
               ? [[candidate.path, updatedPathVersions.get(candidate.path)!]]
               : []
           );
-      if (versionsMap.size > 0) {
+      if (
+        versionsMap.size > 0 &&
+        (this.merge ||
+          !candidate.pullRequest.updates.some(
+            update => update.path === this.manifestPath
+          ))
+      ) {
         candidate.pullRequest.updates.push({
           path: this.manifestPath,
           createIfMissing: false,
