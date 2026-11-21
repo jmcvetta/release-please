@@ -210,7 +210,7 @@ describe('Plugin compatibility', () => {
         true,
         ['autorelease: pending'],
         '1.0.0',
-        '# Changelog\n\n## [1.0.0](https://example.com/compare/a-v0.0.0...a-v1.0.0) (2026-01-01)\n\nRelease notes.\n\n## Previous notes\n\n* c bumped to 3.0.0\n',
+        '# Changelog\n\n## [1.0.0](https://example.com/compare/a-v0.0.0...a-v1.0.0) (2026-01-01)\n\nRelease notes.\n\n## Previous notes\n\n* c bumped to 3.0.0\n'
       );
       try {
         repository.change('c', 'feat: add library feature');
