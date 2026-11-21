@@ -432,11 +432,7 @@ describe('MavenWorkspace plugin', () => {
         buildMockCandidatePullRequest('maven1', 'maven', '1.1.2', {
           component: 'maven1',
           updates: [
-            buildMockPackageUpdate(
-              'maven1/pom.xml',
-              'maven1/pom.xml',
-              '1.1.2'
-            ),
+            buildMockPackageUpdate('maven1/pom.xml', 'maven1/pom.xml', '1.1.2'),
             {
               path: '.release-please-manifest.json',
               createIfMissing: false,
