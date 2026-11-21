@@ -15,7 +15,7 @@
 import {execFileSync} from 'child_process';
 import {mkdirSync, mkdtempSync, writeFileSync, rmSync} from 'fs';
 import {tmpdir} from 'os';
-import {dirname, join, normalize} from 'path';
+import {dirname, join, posix} from 'path';
 import * as sinon from 'sinon';
 import {GitHub, GitHubRelease} from '../../../src/github';
 import {Manifest} from '../../../src/manifest';
@@ -139,7 +139,7 @@ export class WorkspaceRepository {
       .callsFake(async (path, ref) => {
         try {
           return buildGitHubFileRaw(
-            this.git('show', `${ref}:${normalize(path)}`)
+            this.git('show', `${ref}:${posix.normalize(path)}`)
           );
         } catch {
           throw new FileNotFoundError(path);

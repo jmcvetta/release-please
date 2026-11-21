@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {normalize} from 'path';
+import {posix} from 'path';
 import {Scm} from '../scm';
 import {CandidateReleasePullRequest, RepositoryConfig} from '../manifest';
 import {PackageLockJson} from '../updaters/node/package-lock-json';
@@ -593,8 +593,8 @@ export class NodeWorkspace extends WorkspacePlugin<Package> {
     const configuredPath =
       this.repositoryConfig[path].changelogPath ?? 'CHANGELOG.md';
     return configuredPath.startsWith('/')
-      ? normalize(configuredPath).replace(/^\/+/, '')
-      : normalize(addPath(path, configuredPath));
+      ? posix.normalize(configuredPath).replace(/^\/+/, '')
+      : posix.normalize(addPath(path, configuredPath));
   }
 
   private async acknowledgmentNotes(
